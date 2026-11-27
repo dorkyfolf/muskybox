@@ -16,6 +16,15 @@ pub fn run(
     use victory_hle::{HleResolver, HostPolicy};
     use victory_loader::{BindReport, UnimplementedPolicy, WithTitleDlls};
 
+    // The intro can play through the host's WASAPI mix or Bink directly,
+    // bypassing the XMA-ring and APU-Opus mutes. With the same switch, silence
+    // this process's audio session so every one of its streams is muted.
+    if std::env::var_os("VICTORY_NO_AUDIO").is_some_and(|v| v == "1") {
+        match mute_process_audio_session() {
+            Ok(()) => println!("audio          process session muted (VICTORY_NO_AUDIO=1)"),
+            Err(error) => eprintln!("warning: could not mute the process audio session: {error}"),
+        }
+    }
     // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
     let cfg = victory_core::Config::load()?;
@@ -132,6 +141,41 @@ pub fn run(
         .join()
         .map_err(|_| anyhow::anyhow!("title main thread panicked"))??;
     println!("title exited with {code}");
+    Ok(())
+}
+
+/// Mutes this process's default audio session through the WASAPI session
+/// manager. Covers audio that never reaches our XMA or APU hooks, such as Bink
+/// video audio and anything else the host mixes. Failure is non-fatal: the
+/// narrower mutes still apply and the title keeps running.
+#[cfg(windows)]
+fn mute_process_audio_session() -> windows::core::Result<()> {
+    use windows::Win32::Media::Audio::{
+        IAudioSessionManager2, IMMDeviceEnumerator, ISimpleAudioVolume, MMDeviceEnumerator,
+        eConsole, eRender,
+    };
+    use windows::Win32::System::Com::{
+        CLSCTX_ALL, COINIT_MULTITHREADED, CoCreateInstance, CoInitializeEx,
+    };
+    use windows::core::Interface;
+
+    // SAFETY: COM is initialized on this thread first; every interface below
+    // comes from the system or a live interface and is released by its RAII
+    // handle. None of these raw pointers outlive the call.
+    unsafe {
+        // S_FALSE (already initialized) and RPC_E_CHANGED_MODE (a different
+        // apartment on this thread) are both harmless. Never pair this with
+        // CoUninitialize: the apartment must outlive the interfaces above.
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        let enumerator: IMMDeviceEnumerator =
+            CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL)?;
+        let endpoint = enumerator.GetDefaultAudioEndpoint(eRender, eConsole)?;
+        let manager = endpoint.Activate::<IAudioSessionManager2>(CLSCTX_ALL, None)?;
+        // A NULL session GUID selects this process's default session.
+        let control = manager.GetAudioSessionControl(None, 0)?;
+        let volume = control.cast::<ISimpleAudioVolume>()?;
+        volume.SetMasterVolume(0.0, std::ptr::null())?;
+    }
     Ok(())
 }
 

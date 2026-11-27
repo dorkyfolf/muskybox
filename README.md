@@ -144,7 +144,7 @@ Selected environment variables, all read from the source in this repository:
 | `VICTORY_SHADER_LOOP_LIMIT` | cap iterations in translated shader loops |
 | `VICTORY_SKIP_PIPELINES` | skip draws or dispatches by shader hash |
 | `VICTORY_VIEW_LIMIT`, `VICTORY_HOST_WAVE` | simulate a capped view heap or wave size during translation |
-| `VICTORY_NO_AUDIO=1` | temporary mute switch: decoded PCM is written as silence while HLE calls still succeed (OFF by default) |
+| `VICTORY_NO_AUDIO=1` | temporary mute switch: decoded PCM is written as silence and this process's host audio session is set to zero, while HLE calls still succeed (OFF by default) |
 | `VICTORY_STAGE_LOG=1` | poll the title's stage globals every 100 ms and log a line to stderr on change in diagnostics builds (OFF by default) |
 
 ## Controls
