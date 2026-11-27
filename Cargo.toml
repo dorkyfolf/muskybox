@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*", "apps/*", "xtask"]
+members = ["packages/*"]
 # Fixtures are standalone crates built on demand by integration tests.
 exclude = ["tests/fixtures"]
 
@@ -13,15 +13,15 @@ publish = false
 
 [workspace.dependencies]
 # Internal crates
-victory-core = { path = "crates/victory-core" }
-victory-pe = { path = "crates/victory-pe" }
-victory-loader = { path = "crates/victory-loader" }
-victory-hle = { path = "crates/victory-hle" }
-victory-gpu = { path = "crates/victory-gpu" }
-victory-shader = { path = "crates/victory-shader" }
-victory-formats = { path = "crates/victory-formats" }
-victory-pipeline = { path = "crates/victory-pipeline" }
-victory-game = { path = "crates/victory-game" }
+victory-core = { path = "packages/victory-core" }
+victory-pe = { path = "packages/victory-pe" }
+victory-loader = { path = "packages/victory-loader" }
+victory-hle = { path = "packages/victory-hle" }
+victory-gpu = { path = "packages/victory-gpu" }
+victory-shader = { path = "packages/victory-shader" }
+victory-formats = { path = "packages/victory-formats" }
+victory-pipeline = { path = "packages/victory-pipeline" }
+victory-game = { path = "packages/victory-game" }
 
 # External crates
 anyhow = "1.0.104"
@@ -30,6 +30,7 @@ clap = { version = "4.6.9", features = ["derive"] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
 serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.145"
 toml = "1.2.2"
 object = { version = "0.41.0", default-features = false, features = ["read_core", "pe", "coff", "archive", "std"] }
 windows-sys = "0.61.2"
