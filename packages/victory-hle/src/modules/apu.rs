@@ -11,7 +11,7 @@
 use std::alloc::Layout;
 use std::collections::VecDeque;
 use std::ffi::c_void;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
 
 use opus_pure::OpusDecoder;
 use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
@@ -312,6 +312,16 @@ pub extern "system" fn XApuEnqueueCommand(
     S_OK
 }
 
+/// True only when `VICTORY_NO_AUDIO` is exactly `"1"`. Read once. This is a
+/// temporary mute switch: decoded Opus samples are zeroed before they are
+/// copied to the title's output buffer, which is the narrowest point where
+/// audio leaves for the host, so every HLE call still succeeds and reports
+/// its normal frame count and output length.
+fn no_audio() -> bool {
+    static NO_AUDIO: OnceLock<bool> = OnceLock::new();
+    *NO_AUDIO.get_or_init(|| std::env::var_os("VICTORY_NO_AUDIO").is_some_and(|v| v == "1"))
+}
+
 /// Decodes one packet into the command's output buffer, keeping the frames
 /// from `first_frame` on, at most `frame_count` of them.
 fn process(decoder: &mut OpusDecoder, options: u32, command: &Process, result: &mut ApuResult) {
@@ -335,6 +345,9 @@ fn process(decoder: &mut OpusDecoder, options: u32, command: &Process, result: &
             return;
         }
     };
+    if no_audio() {
+        pcm[..decoded * channels].fill(0.0);
+    }
     let first = (command.first_frame as usize).min(decoded);
     let frames = (decoded - first)
         .min(command.frame_count as usize)

@@ -109,10 +109,12 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
 
 /// Watchdog abort sites in the main title image, as `(RVA, expected bytes)`.
 /// Each is a two-byte conditional jump that aborts the process by writing to
-/// address zero after roughly 30 seconds without a heartbeat.
+/// address zero after roughly 30 seconds without a heartbeat. These are RVAs:
+/// the `.text` section maps file offset = RVA - 0xc00, so the earlier file
+/// offsets (0x2214fdc, 0x2215070) pointed into the wrong bytes.
 const WATCHDOG_SITES: [(usize, [u8; 2]); 2] = [
-    (0x2214fdc, [0x73, 0x2e]),
-    (0x2215070, [0x74, 0x04]),
+    (0x2215bdc, [0x73, 0x2e]),
+    (0x2215c70, [0x74, 0x04]),
 ];
 
 /// Optional watchdog patch, on only when `VICTORY_NO_WATCHDOG` is exactly
