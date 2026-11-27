@@ -879,9 +879,9 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
 /// is ignored: the request still reports its original decode HRESULT.
 fn zero_failed_destination(request: &Request) {
     static ENABLED: OnceLock<bool> = OnceLock::new();
-    if !*ENABLED.get_or_init(|| {
-        std::env::var("VICTORY_DSTORAGE_ZERO_FAILED").is_ok_and(|v| v == "1")
-    }) {
+    if !*ENABLED
+        .get_or_init(|| std::env::var("VICTORY_DSTORAGE_ZERO_FAILED").is_ok_and(|v| v == "1"))
+    {
         return;
     }
     let size = request.destination_size as usize;
