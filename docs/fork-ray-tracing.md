@@ -48,7 +48,7 @@ shaders and emulates the one instruction.
 3. **The ray test, emulated in DXIL.** Four slab tests and a sorting network
    for box nodes; a watertight ray/triangle test for triangle nodes; both forms
    of the instruction. A plain Rust reference lives in
-   `crates/victory-shader/src/bvh.rs`; tests run the emitted DXIL on the GPU
+   `packages/victory-shader/src/bvh.rs`; tests run the emitted DXIL on the GPU
    over 311 ray/node cases and compare with the reference bit for bit.
 4. **The trace and shading programs translate** (59 of 64 trace programs, and
    the irradiance-cache shading program). This needed lane masks treated as
@@ -76,10 +76,10 @@ shaders and emulates the one instruction.
 
 ## Where to look
 
-- `crates/victory-shader/src/bvh.rs`: the reference for the node test.
-- `crates/victory-shader/src/emit/lower.rs`: the lowering of the two
+- `packages/victory-shader/src/bvh.rs`: the reference for the node test.
+- `packages/victory-shader/src/emit/lower.rs`: the lowering of the two
   instructions and of memory by address (`Lower::memory`).
-- `crates/victory-shader/src/resource.rs`: address tracking for descriptors
+- `packages/victory-shader/src/resource.rs`: address tracking for descriptors
   and raw addresses.
-- `crates/victory-gpu/src/pipeline.rs`, `draw.rs`: the builder rule and the
+- `packages/victory-gpu/src/pipeline.rs`, `draw.rs`: the builder rule and the
   host side of root views and title memory.
