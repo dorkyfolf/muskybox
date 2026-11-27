@@ -79,6 +79,13 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
         path,
         info: prepared.info.clone(),
     };
+    // The main title image's watchdog aborts the process after roughly 30
+    // seconds without a heartbeat. Patch its jumps before any title code
+    // runs; the title's DLLs do not carry that code.
+    if !loaded.info.is_dll() {
+        // SAFETY: just mapped, and no title code has run.
+        unsafe { disable_watchdog(loaded.base()) };
+    }
     // A DLL indexes its TLS properly; only an exe assumes index 0.
     if !loaded.info.is_dll() {
         // SAFETY: just mapped, and no title code has run.
@@ -98,6 +105,79 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
         crate::watch::configure_presets(Some(loaded.base()));
     }
     Ok(loaded)
+}
+
+/// Watchdog abort sites in the main title image, as `(RVA, expected bytes)`.
+/// Each is a two-byte conditional jump that aborts the process by writing to
+/// address zero after roughly 30 seconds without a heartbeat.
+const WATCHDOG_SITES: [(usize, [u8; 2]); 2] = [
+    (0x2214fdc, [0x73, 0x2e]),
+    (0x2215070, [0x74, 0x04]),
+];
+
+/// Optional watchdog patch, on only when `VICTORY_NO_WATCHDOG` is exactly
+/// `"1"`. Reads both abort sites once and logs their bytes. When they still
+/// hold the expected jump opcodes, each becomes two NOPs written through
+/// `VirtualProtect`, with the old protection restored. Different bytes warn
+/// and leave the image untouched, since that means a different title build.
+/// Called from [`load`] after mapping and before any title code runs.
+///
+/// # Safety
+/// `base` must name the mapped main title image.
+unsafe fn disable_watchdog(base: usize) {
+    if std::env::var("VICTORY_NO_WATCHDOG").ok().as_deref() != Some("1") {
+        return;
+    }
+    let mut sites = [(0usize, [0u8; 2]); 2];
+    for (slot, &(rva, _)) in sites.iter_mut().zip(&WATCHDOG_SITES) {
+        let Some(va) = base.checked_add(rva) else {
+            tracing::warn!(
+                rva = format_args!("{rva:#x}"),
+                "VICTORY_NO_WATCHDOG: RVA overflow; title left unchanged"
+            );
+            return;
+        };
+        // SAFETY: the image is mapped and the RVA names committed title code.
+        let at = va as *const u8;
+        let observed = [unsafe { at.read() }, unsafe { at.add(1).read() }];
+        *slot = (va, observed);
+    }
+    tracing::info!(
+        first = format_args!("{:02x} {:02x}", sites[0].1[0], sites[0].1[1]),
+        second = format_args!("{:02x} {:02x}", sites[1].1[0], sites[1].1[1]),
+        "VICTORY_NO_WATCHDOG: observed watchdog bytes"
+    );
+    let mismatch = sites
+        .iter()
+        .zip(&WATCHDOG_SITES)
+        .any(|((_, observed), (_, expected))| observed != expected);
+    if mismatch {
+        tracing::warn!(
+            first = format_args!("{:02x} {:02x}", sites[0].1[0], sites[0].1[1]),
+            second = format_args!("{:02x} {:02x}", sites[1].1[0], sites[1].1[1]),
+            "VICTORY_NO_WATCHDOG: unexpected bytes (image version mismatch); title left unchanged"
+        );
+        return;
+    }
+    for &(va, _) in &sites {
+        let nops = [0x90u8; 2];
+        let mut old = 0;
+        // SAFETY: the RVA names committed title code; the out pointer is valid.
+        if unsafe { VirtualProtect(va as *const c_void, 2, PAGE_READWRITE, &mut old) } == 0 {
+            tracing::warn!(
+                at = format_args!("{va:#x}"),
+                error = %std::io::Error::last_os_error(),
+                "VICTORY_NO_WATCHDOG: page not writable; title left unchanged"
+            );
+            return;
+        }
+        // SAFETY: the two bytes at `va` are now writable and inside the image.
+        unsafe { std::ptr::copy_nonoverlapping(nops.as_ptr(), va as *mut u8, 2) };
+        let mut ignored = 0;
+        // SAFETY: restoring the protection we just changed.
+        unsafe { VirtualProtect(va as *const c_void, 2, old, &mut ignored) };
+    }
+    tracing::info!("title watchdog disabled");
 }
 
 /// Maps the DLLs the title ships in `title_dir` that `main` imports,
