@@ -142,6 +142,7 @@ fn diagnostics(image: &victory_loader::LoadedImage, cfg: &victory_core::Config) 
     victory_loader::dump_stacks_on_schedule();
     victory_hle::modules::audio::capture::start();
     watch(image.base(), image.info().size_of_image as usize);
+    stage_log(image.base());
     // Debugging aid: `VICTORY_CRASH_SAVE=<rva>:<len>,...` (hex) writes those
     // title ranges to `crash-<rva>.bin` in the cache dir on a crash.
     let size = image.info().size_of_image as usize;
@@ -187,6 +188,58 @@ fn watch(base: usize, size: usize) {
             std::thread::sleep(std::time::Duration::from_millis(5));
         }
     });
+}
+
+/// Debugging aid: `VICTORY_STAGE_LOG=1` polls the title's stage globals every
+/// 100 ms and logs one line to stderr whenever any of them changes. The RVAs
+/// come from the verified title build 1.0.2.1 memory map. Kept separate from
+/// `watch`: these are fixed, verified addresses rather than a configurable list.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn stage_log(base: usize) {
+    let Ok(value) = std::env::var("VICTORY_STAGE_LOG") else {
+        return;
+    };
+    if value != "1" {
+        return;
+    }
+    const GAME: usize = 0x7446510;
+    const SESSION: usize = 0x98f828c;
+    const LOADING: usize = 0x7453ed0;
+    std::thread::spawn(move || {
+        let mut seen: Option<(u32, u32, u8)> = None;
+        loop {
+            // SAFETY: verified safe passive reads relative to the image base.
+            let game = unsafe { ((base + GAME) as *const u32).read_volatile() };
+            let session = unsafe { ((base + SESSION) as *const u32).read_volatile() };
+            let loading = unsafe { ((base + LOADING) as *const u8).read_volatile() };
+            let current = (game, session, loading);
+            if seen != Some(current) {
+                eprintln!(
+                    "VItoriaBr: stage game={game:#x} session={session:#x} loading={loading:#x} {}",
+                    stage_label(game, session, loading)
+                );
+                seen = Some(current);
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+    });
+}
+
+/// Short label for a stage snapshot, derived from the verified value map.
+#[cfg(all(windows, feature = "diagnostics"))]
+fn stage_label(game: u32, session: u32, loading: u8) -> &'static str {
+    if game == 3 {
+        "game-running"
+    } else {
+        match session {
+            0xd => "first-run",
+            0 => "story-load",
+            1 => "boot-screens",
+            3 => "landing",
+            _ if loading == 2 => "loading",
+            _ => "other",
+        }
+    }
 }
 
 /// DLLs the host or our runtime provide are never taken from the title.
