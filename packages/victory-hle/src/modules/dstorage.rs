@@ -836,6 +836,7 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
         let n = match inflate(&source, &mut packed) {
             Ok(n) => n,
             Err(hr) => {
+                diag_decode_failure(&source, request);
                 let hr = fail(hr, "zlib");
                 zero_failed_destination(request);
                 return Err(hr);
@@ -855,6 +856,9 @@ fn execute(request: &Request) -> Result<(), HRESULT> {
             None => inflate(&source, out).map_err(|hr| fail(hr, "zlib")),
         };
         decode_failed = result.is_err();
+        if decode_failed {
+            diag_decode_failure(&source, request);
+        }
         result
     });
     if decode_failed {
@@ -905,51 +909,120 @@ fn zero_failed_destination(request: &Request) {
     }
 }
 
+/// Opt-in diagnostics for a failed decode. With `VICTORY_DSTORAGE_DIAG=1`,
+/// logs the first 16 source bytes as hex, the destination size and the
+/// request name, so the tester can tell which asset failed. The switch is
+/// read once; with it off this is a no-op, and logging never changes a
+/// request's result.
+fn diag_decode_failure(source: &[u8], request: &Request) {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    if !*ENABLED.get_or_init(|| std::env::var("VICTORY_DSTORAGE_DIAG").is_ok_and(|v| v == "1")) {
+        return;
+    }
+    let head = &source[..source.len().min(16)];
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut head_hex = String::with_capacity(head.len() * 2);
+    for &b in head {
+        head_hex.push(HEX[(b >> 4) as usize] as char);
+        head_hex.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    tracing::warn!(
+        source_head = head_hex.as_str(),
+        destination_size = request.destination_size,
+        name = text(request.name),
+        "dstorage: failed decode source bytes"
+    );
+}
+
+/// Whether `source` starts with an RFC 1950 zlib header. A stream with one
+/// is wrapped: if it fails, the failure is real (a bad payload or trailer,
+/// or a destination too small) and must not be retried as raw deflate, which
+/// would otherwise accept a corrupt trailer as trailing bytes after its own
+/// stream end.
+fn has_zlib_header(source: &[u8]) -> bool {
+    let &[cmf, flg, ..] = source else {
+        return false;
+    };
+    cmf & 0x0f == 8
+        && cmf >> 4 <= 7
+        && flg & 0x20 == 0
+        && (u16::from(cmf) << 8 | u16::from(flg)) % 31 == 0
+}
+
+/// Runs one decode attempt with `state` already reset for the wanted
+/// wrapper, returning the bytes written or `INVALID_DATA`.
+fn inflate_attempt(
+    state: &mut zlib_rs::Inflate,
+    source: &[u8],
+    out: &mut [u8],
+) -> Result<usize, HRESULT> {
+    // `Inflate::decompress` cannot distinguish a valid empty stream from
+    // an insufficient buffer when `avail_out == 0`, so use a 1-byte scratch
+    // destination and verify `written <= out_len` afterward.
+    let out_len = out.len();
+    let mut scratch = [0u8; 1];
+    let dest = if out_len == 0 { &mut scratch[..] } else { out };
+    let (mut in_pos, mut out_pos) = (0usize, 0usize);
+    let status = loop {
+        match state.decompress(
+            &source[in_pos..],
+            &mut dest[out_pos..],
+            zlib_rs::InflateFlush::NoFlush,
+        ) {
+            Ok(zlib_rs::Status::StreamEnd) => break Ok(zlib_rs::Status::StreamEnd),
+            Ok(zlib_rs::Status::Ok) => {
+                let next_in = state.total_in() as usize;
+                let next_out = state.total_out() as usize;
+                if next_in == in_pos && next_out == out_pos {
+                    break Ok(zlib_rs::Status::BufError);
+                }
+                in_pos = next_in;
+                out_pos = next_out;
+            }
+            other => break other,
+        }
+    };
+    let written = state.total_out() as usize;
+    match status {
+        Ok(zlib_rs::Status::StreamEnd) if written <= out_len => Ok(written),
+        other => {
+            tracing::debug!(?other, "dstorage: zlib stream");
+            Err(INVALID_DATA)
+        }
+    }
+}
+
 /// Inflates a zlib stream into `out`, returning the bytes written. A stream
 /// that ends short of `out` passes: the title's chunks fill it exactly, and
-/// nothing says that is required.
+/// nothing says that is required. Console assets can be raw deflate with no
+/// RFC 1950 wrapper (as in victory-game's SGD5 containers), so a stream
+/// that does not start with a zlib header is retried as raw deflate when the
+/// wrapped attempt fails.
 fn inflate(source: &[u8], out: &mut [u8]) -> Result<usize, HRESULT> {
     thread_local! {
         static INFLATE: std::cell::RefCell<zlib_rs::Inflate> =
             std::cell::RefCell::new(zlib_rs::Inflate::new(true, 15));
+        static RAW_INFLATE: std::cell::RefCell<zlib_rs::Inflate> =
+            std::cell::RefCell::new(zlib_rs::Inflate::new(false, 15));
     }
-    INFLATE.with_borrow_mut(|state| {
+    let wrapped = INFLATE.with_borrow_mut(|state| {
         state.reset(true);
-        // `Inflate::decompress` cannot distinguish a valid empty stream from
-        // an insufficient buffer when `avail_out == 0`, so use a 1-byte scratch
-        // destination and verify `written <= out_len` afterward.
-        let out_len = out.len();
-        let mut scratch = [0u8; 1];
-        let dest = if out_len == 0 { &mut scratch[..] } else { out };
-        let (mut in_pos, mut out_pos) = (0usize, 0usize);
-        let status = loop {
-            match state.decompress(
-                &source[in_pos..],
-                &mut dest[out_pos..],
-                zlib_rs::InflateFlush::NoFlush,
-            ) {
-                Ok(zlib_rs::Status::StreamEnd) => break Ok(zlib_rs::Status::StreamEnd),
-                Ok(zlib_rs::Status::Ok) => {
-                    let next_in = state.total_in() as usize;
-                    let next_out = state.total_out() as usize;
-                    if next_in == in_pos && next_out == out_pos {
-                        break Ok(zlib_rs::Status::BufError);
-                    }
-                    in_pos = next_in;
-                    out_pos = next_out;
-                }
-                other => break other,
-            }
-        };
-        let written = state.total_out() as usize;
-        match status {
-            Ok(zlib_rs::Status::StreamEnd) if written <= out_len => Ok(written),
-            other => {
-                tracing::debug!(?other, "dstorage: zlib stream");
-                Err(INVALID_DATA)
-            }
-        }
-    })
+        inflate_attempt(state, source, out)
+    });
+    if wrapped.is_ok() || has_zlib_header(source) {
+        return wrapped;
+    }
+    let raw = RAW_INFLATE.with_borrow_mut(|state| {
+        state.reset(false);
+        inflate_attempt(state, source, out)
+    });
+    if raw.is_ok() {
+        tracing::debug!("dstorage: zlib stream decoded as raw deflate");
+        return raw;
+    }
+    // Report the wrapped failure: it is the format the option names, and
+    // both attempts agree on `INVALID_DATA` here.
+    wrapped
 }
 
 /// The BCPack format's constant tables, parsed once for the process. If
@@ -1294,6 +1367,23 @@ mod tests {
         let (packed, rc) = zlib_rs::compress_slice(&mut buf, plain, zlib_rs::DeflateConfig::new(6));
         assert_eq!(rc, zlib_rs::ReturnCode::Ok);
         packed.to_vec()
+    }
+
+    #[test]
+    fn wrapped_and_raw_deflate_streams_both_inflate() {
+        let plain = pattern(70_000);
+        let wrapped = compress_zlib(&plain);
+        // zlib_rs makes RFC 1950 streams. Stripping the two-byte header and
+        // four-byte Adler-32 leaves the raw deflate payload the console uses
+        // in assets such as SGD5 shader containers.
+        let raw = wrapped[2..wrapped.len() - 4].to_vec();
+        assert!(!has_zlib_header(&raw), "a raw stream has no zlib header");
+        let mut from_wrapped = vec![0u8; plain.len()];
+        let mut from_raw = vec![0u8; plain.len()];
+        assert_eq!(inflate(&wrapped, &mut from_wrapped), Ok(plain.len()));
+        assert_eq!(inflate(&raw, &mut from_raw), Ok(plain.len()));
+        assert_eq!(from_wrapped, plain);
+        assert_eq!(from_raw, plain);
     }
 
     #[test]
